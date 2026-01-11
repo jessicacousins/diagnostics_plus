@@ -1,132 +1,473 @@
-import React, { useMemo, useState } from 'react'
-import Navbar from './components/Navbar.jsx'
-import Card from './components/Card.jsx'
-import StatRow from './components/StatRow.jsx'
-import Terminal from './components/Terminal.jsx'
-import PingTest from './components/PingTest.jsx'
-import ExportPDF from './components/ExportPDF.jsx'
-import ExportJSON from './components/ExportJSON.jsx'
-import CopySummary from './components/CopySummary.jsx'
-import SnapshotTools from './components/SnapshotTools.jsx'
-import { ToastProvider, useToasts } from './components/Toasts.jsx'
-import { useSystemInfo } from './hooks/useSystemInfo.js'
-import { useNetworkInfo } from './hooks/useNetworkInfo.js'
-import { useStorageUsage } from './hooks/useStorageUsage.js'
-import { useClock } from './hooks/useClock.js'
-import { useOnline } from './hooks/useOnline.js'
-import { usePerformanceHealth } from './hooks/usePerformanceHealth.js'
-import { useBattery } from './hooks/useBattery.js'
-import { useMediaSupport } from './hooks/useMediaSupport.js'
-import { useA11yPrefs } from './hooks/useA11yPrefs.js'
-import { useStorageHealth } from './hooks/useStorageHealth.js'
-import { usePermissionsInfo } from './hooks/usePermissionsInfo.js'
-import { useSecurityInfo } from './hooks/useSecurityInfo.js'
-import { useSessionSignals } from './hooks/useSessionSignals.js'
-import { formatBytes } from './utils/format.js'
+import React, { useMemo, useState } from "react";
+import Navbar from "./components/Navbar.jsx";
+import Card from "./components/Card.jsx";
+import StatRow from "./components/StatRow.jsx";
+import Terminal from "./components/Terminal.jsx";
+import PingTest from "./components/PingTest.jsx";
+import ExportPDF from "./components/ExportPDF.jsx";
+import { ToastProvider, useToasts } from "./components/Toasts.jsx";
+import { useSystemInfo } from "./hooks/useSystemInfo.js";
+import { useNetworkInfo } from "./hooks/useNetworkInfo.js";
+import { useStorageUsage } from "./hooks/useStorageUsage.js";
+import { useClock } from "./hooks/useClock.js";
+import { useOnline } from "./hooks/useOnline.js";
+import { formatBytes } from "./utils/format.js";
+import DailyInsight from "./components/DailyInsight.jsx";
+import ScoresPanel from "./components/ScoresPanel.jsx";
+import DailySnapshotPanel from "./components/DailySnapshotPanel.jsx";
+import TimelinePanel from "./components/TimelinePanel.jsx";
+import ChangesPanel from "./components/ChangesPanel.jsx";
+import ExportsPanel from "./components/ExportsPanel.jsx";
+import NotificationsPanel from "./components/NotificationsPanel.jsx";
+import ModeToggle from "./components/ModeToggle.jsx";
+import TrustBlock from "./components/TrustBlock.jsx";
 
-function AppInner(){
-  const { push } = useToasts()
-  const { info, display } = useSystemInfo()
-  const net = useNetworkInfo()
-  const { bytes, refresh } = useStorageUsage()
-  const { time, date } = useClock()
-  const online = useOnline()
+import { useMode } from "./hooks/useMode.js";
+import { buildSnapshot, diffSnapshots } from "./utils/snapshot.js";
+import { computeScores, buildHumanSummary } from "./utils/scoring.js";
 
-  const perf = usePerformanceHealth()
-  const battery = useBattery()
-  const media = useMediaSupport()
-  const a11y = useA11yPrefs()
-  const storageHealth = useStorageHealth()
-  const perms = usePermissionsInfo()
-  const security = useSecurityInfo()
-  const session = useSessionSignals()
+function AppInner() {
+  const { push } = useToasts();
+  const { info, display } = useSystemInfo();
+  const net = useNetworkInfo();
+  const { bytes, refresh } = useStorageUsage();
+  const { time, date } = useClock();
+  const online = useOnline();
+  const [latency, setLatency] = useState(null);
+  const [fps, setFps] = useState(null);
+  const [eventLoopLag, setEventLoopLag] = useState(null);
+  const [longTasks, setLongTasks] = useState({ count: 0, lastMs: null });
+  const [heap, setHeap] = useState(null);
+  const [battery, setBattery] = useState(null);
+  const [storagePersisted, setStoragePersisted] = useState(null);
+  const [storageEstimate, setStorageEstimate] = useState(null);
+  const [idbOk, setIdbOk] = useState(null);
+  const [permissions, setPermissions] = useState(null);
+  const [mediaCaps, setMediaCaps] = useState(null);
+  const [securityCtx, setSecurityCtx] = useState(null);
 
-  const [latency, setLatency] = useState(null)
-  const [fps, setFps] = useState(null)
-
-  const [redacted, setRedacted] = useState(() => {
-    try{ return localStorage.getItem('nexus_redacted_v1') === '1' }catch{ return false }
-  })
-
-  React.useEffect(() => {
-    try{ localStorage.setItem('nexus_redacted_v1', redacted ? '1' : '0') }catch{}
-  }, [redacted])
+  const { mode, setMode } = useMode();
 
   // Lightweight FPS estimate (1s window)
   React.useEffect(() => {
-    let raf = 0
-    let frames = 0
-    let last = performance.now()
+    let raf = 0;
+    let frames = 0;
+    let last = performance.now();
 
     const tick = (t) => {
-      frames++
-      const dt = t - last
-      if (dt >= 1000){
-        setFps(Math.round((frames * 1000) / dt))
-        frames = 0
-        last = t
+      frames++;
+      const dt = t - last;
+      if (dt >= 1000) {
+        setFps(Math.round((frames * 1000) / dt));
+        frames = 0;
+        last = t;
       }
-      raf = requestAnimationFrame(tick)
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  //  Event-loop lag (setTimeout drift)
+  React.useEffect(() => {
+    let alive = true;
+    let t = 0;
+    const interval = 300;
+    const loop = () => {
+      const start = performance.now();
+      setTimeout(() => {
+        if (!alive) return;
+        const end = performance.now();
+        const drift = Math.max(0, end - start - interval);
+        // Smooth
+        setEventLoopLag((prev) => {
+          const v = drift;
+          if (prev == null) return v;
+          return prev * 0.8 + v * 0.2;
+        });
+        t = window.setTimeout(loop, interval);
+      }, interval);
+    };
+    loop();
+    return () => {
+      alive = false;
+      window.clearTimeout(t);
+    };
+  }, []);
+
+  // Long Tasks observer (best-effort; safe and page-scoped)
+  React.useEffect(() => {
+    try {
+      if (!("PerformanceObserver" in window)) return;
+      const obs = new PerformanceObserver((list) => {
+        const entries = list.getEntries?.() || [];
+        if (!entries.length) return;
+        const last = entries[entries.length - 1];
+        const ms = Number((last.duration ?? 0).toFixed(1));
+        setLongTasks((prev) => ({
+          count: (prev?.count ?? 0) + entries.length,
+          lastMs: ms,
+        }));
+      });
+      // longtask supported in Chromium
+      obs.observe({ type: "longtask", buffered: true });
+      return () => obs.disconnect();
+    } catch {
+      // ignore
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [])
+  }, []);
+
+  // JS heap (Chromium only)
+  React.useEffect(() => {
+    try {
+      const m = performance?.memory;
+      if (!m) return;
+      const poll = () => {
+        setHeap({
+          used: m.usedJSHeapSize,
+          total: m.totalJSHeapSize,
+          limit: m.jsHeapSizeLimit,
+        });
+      };
+      poll();
+      const id = setInterval(poll, 1500);
+      return () => clearInterval(id);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Battery (best-effort)
+  React.useEffect(() => {
+    let cleanup = null;
+    (async () => {
+      try {
+        if (!navigator.getBattery) return;
+        const b = await navigator.getBattery();
+        const read = () => {
+          setBattery({
+            level: Math.round((b.level ?? 0) * 100),
+            charging: !!b.charging,
+            chargingTime: b.chargingTime,
+            dischargingTime: b.dischargingTime,
+          });
+        };
+        read();
+        const onChange = () => read();
+        b.addEventListener("levelchange", onChange);
+        b.addEventListener("chargingchange", onChange);
+        b.addEventListener("chargingtimechange", onChange);
+        b.addEventListener("dischargingtimechange", onChange);
+        cleanup = () => {
+          b.removeEventListener("levelchange", onChange);
+          b.removeEventListener("chargingchange", onChange);
+          b.removeEventListener("chargingtimechange", onChange);
+          b.removeEventListener("dischargingtimechange", onChange);
+        };
+      } catch {
+        // ignore
+      }
+    })();
+    return () => cleanup?.();
+  }, []);
+
+  // Storage persisted + estimate + IndexedDB health
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        if (navigator.storage?.persisted) {
+          const p = await navigator.storage.persisted();
+          if (alive) setStoragePersisted(!!p);
+        }
+      } catch {
+        /* ignore */
+      }
+
+      try {
+        if (navigator.storage?.estimate) {
+          const est = await navigator.storage.estimate();
+          if (alive)
+            setStorageEstimate({
+              quota: est.quota ?? null,
+              usage: est.usage ?? null,
+            });
+        }
+      } catch {
+        /* ignore */
+      }
+
+      try {
+        const ok = await new Promise((resolve) => {
+          if (!("indexedDB" in window)) return resolve(false);
+          const req = indexedDB.open("__nexus_idb_probe__", 1);
+          req.onupgradeneeded = () => {
+            /* noop */
+          };
+          req.onsuccess = () => {
+            try {
+              req.result.close();
+              indexedDB.deleteDatabase("__nexus_idb_probe__");
+            } catch {
+              /* noop */
+            }
+            resolve(true);
+          };
+          req.onerror = () => resolve(false);
+        });
+        if (alive) setIdbOk(ok);
+      } catch {
+        if (alive) setIdbOk(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Permissions overview (query only; no prompts)
+  React.useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        if (!navigator.permissions?.query) return;
+        const names = [
+          "notifications",
+          "geolocation",
+          "microphone",
+          "camera",
+          "clipboard-read",
+          "clipboard-write",
+        ];
+        const out = {};
+        for (const n of names) {
+          try {
+            const s = await navigator.permissions.query({ name: n });
+            out[n] = s.state;
+          } catch {
+            out[n] = "unavailable";
+          }
+        }
+        if (alive) setPermissions(out);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Media capability matrix (safe: capability checks only)
+  React.useEffect(() => {
+    try {
+      const video = [
+        { label: "H.264 (MP4)", type: 'video/mp4; codecs="avc1.42E01E"' },
+        { label: "HEVC (MP4)", type: 'video/mp4; codecs="hvc1"' },
+        { label: "VP9 (WebM)", type: 'video/webm; codecs="vp9"' },
+        { label: "AV1 (MP4)", type: 'video/mp4; codecs="av01.0.05M.08"' },
+      ];
+      const audio = [
+        { label: "AAC", type: 'audio/mp4; codecs="mp4a.40.2"' },
+        { label: "Opus", type: 'audio/ogg; codecs="opus"' },
+        { label: "MP3", type: "audio/mpeg" },
+        { label: "WAV", type: "audio/wav" },
+      ];
+      const images = [
+        { label: "WebP", type: "image/webp" },
+        { label: "AVIF", type: "image/avif" },
+      ];
+      const can = (t) => {
+        try {
+          const v = document.createElement("video");
+          return !!v.canPlayType?.(t);
+        } catch {
+          return false;
+        }
+      };
+      const canA = (t) => {
+        try {
+          const a = document.createElement("audio");
+          return !!a.canPlayType?.(t);
+        } catch {
+          return false;
+        }
+      };
+      setMediaCaps({
+        video: video.map((x) => ({ ...x, ok: can(x.type) })),
+        audio: audio.map((x) => ({ ...x, ok: canA(x.type) })),
+        images: images.map((x) => ({
+          ...x,
+          ok: (() => {
+            try {
+              const c = document.createElement("canvas");
+              return c.toDataURL(x.type).startsWith(`data:${x.type}`);
+            } catch {
+              return false;
+            }
+          })(),
+        })),
+      });
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Security context + SW status + protocol
+  React.useEffect(() => {
+    try {
+      const isSecure = window.isSecureContext;
+      const proto = window.location?.protocol || "—";
+      const coi = !!window.crossOriginIsolated;
+      const sw = !!navigator.serviceWorker;
+      const controlled = !!navigator.serviceWorker?.controller;
+      // nextHopProtocol is per-resource; we probe navigation timing if available
+      let nhp = "—";
+      try {
+        const nav = performance.getEntriesByType?.("navigation")?.[0];
+        if (nav?.nextHopProtocol) nhp = nav.nextHopProtocol;
+      } catch {
+        /* ignore */
+      }
+      setSecurityCtx({
+        isSecure,
+        proto,
+        coi,
+        sw,
+        controlled,
+        nextHopProtocol: nhp,
+      });
+    } catch {
+      // ignore
+    }
+  }, []);
 
   const privacy = useMemo(() => {
-    const items = []
-    items.push({ k:'Do Not Track', v: info.dnt })
-    items.push({ k:'Cookies', v: info.cookieEnabled })
-    items.push({ k:'Touch Support', v: ('ontouchstart' in window) ? 'Likely' : 'Unknown/No' })
-    items.push({ k:'Storage Access', v: (bytes == null) ? 'Blocked/Unavailable' : 'Available' })
-    return items
-  }, [info.dnt, info.cookieEnabled, bytes])
+    const items = [];
+    items.push({ k: "Do Not Track", v: info.dnt });
+    items.push({ k: "Cookies", v: info.cookieEnabled });
+    items.push({
+      k: "Touch Support",
+      v: "ontouchstart" in window ? "Likely" : "Unknown/No",
+    });
+    items.push({
+      k: "Storage Access",
+      v: bytes == null ? "Blocked/Unavailable" : "Available",
+    });
+    return items;
+  }, [info.dnt, info.cookieEnabled, bytes]);
 
-  const diagnostics = useMemo(() => ({
-    system: { info, display },
-    network: { ...net, onlineText: online ? 'Connected' : 'Offline' },
-    storageUsage: { bytes },
-    storageHealth,
-    clock: { time, date },
-    performance: perf,
-    battery,
-    media,
-    a11y,
-    permissions: perms,
-    security,
-    session,
-    runtime: { fps, latency }
-  }), [info, display, net, online, bytes, storageHealth, time, date, perf, battery, media, a11y, perms, security, session, fps, latency])
+  const systemContext = useMemo(
+    () => ({
+      system: info,
+      display,
+    }),
+    [info, display]
+  );
 
-  const systemContext = useMemo(() => ({
-    ...diagnostics,
-    redacted
-  }), [diagnostics, redacted])
+  function toast(title, msg) {
+    push(title, msg);
+  }
 
-  function toast(title, msg){ push(title, msg) }
-
-  function clearStorage(){
-    try{
-      localStorage.clear()
-      refresh()
-      toast('Storage cleared', 'Local storage has been wiped for this origin.')
-    }catch{
-      toast('Storage blocked', 'Browser prevented access to localStorage.')
+  function clearStorage() {
+    try {
+      localStorage.clear();
+      refresh();
+      toast("Storage cleared", "Local storage has been wiped for this origin.");
+    } catch {
+      toast("Storage blocked", "Browser prevented access to localStorage.");
     }
   }
 
-  const onlineTone = online ? 'good' : 'bad'
-  const onlineLabel = online ? 'Connected' : 'Offline'
+  const onlineTone = online ? "good" : "bad";
+  const onlineLabel = online ? "Connected" : "Offline";
 
-  const netType = net.supported ? (net.effectiveType || 'WIFI/ETH') : 'Not Supported'
-  const down = net.supported ? (net.downlink != null ? `~${net.downlink} Mbps` : '—') : '—'
-  const rtt = net.supported ? (net.rtt != null ? `${net.rtt} ms` : '—') : '—'
+  const netType = net.supported
+    ? net.effectiveType || "WIFI/ETH"
+    : "Not Supported";
+  const down = net.supported
+    ? net.downlink != null
+      ? `~${net.downlink} Mbps`
+      : "—"
+    : "—";
+  const rtt = net.supported ? (net.rtt != null ? `${net.rtt} ms` : "—") : "—";
 
   const kpi = [
-    { label:'Status', val: onlineLabel, tone: onlineTone },
-    { label:'FPS', val: fps ? `${fps}` : '—' },
-    { label:'Local Storage', val: bytes == null ? '—' : formatBytes(bytes) },
-    { label:'Latency', val: latency == null ? '—' : `${latency.toFixed(2)} ms` }
-  ]
+    { label: "Status", val: onlineLabel, tone: onlineTone },
+    { label: "FPS", val: fps ? `${fps}` : "—" },
+    { label: "Local Storage", val: bytes == null ? "—" : formatBytes(bytes) },
+    {
+      label: "Latency",
+      val: latency == null ? "—" : `${latency.toFixed(2)} ms`,
+    },
+  ];
+
+  // Build a complete snapshot object for daily/timeline/export
+  const snapshot = useMemo(
+    () =>
+      buildSnapshot({
+        info,
+        display,
+        net,
+        online,
+        bytes,
+        fps,
+        latency,
+        eventLoopLag,
+        longTasks,
+        heap,
+        battery,
+        storagePersisted,
+        storageEstimate,
+        idbOk,
+        permissions,
+        mediaCaps,
+        securityCtx,
+      }),
+    [
+      info,
+      display,
+      net,
+      online,
+      bytes,
+      fps,
+      latency,
+      eventLoopLag,
+      longTasks,
+      heap,
+      battery,
+      storagePersisted,
+      storageEstimate,
+      idbOk,
+      permissions,
+      mediaCaps,
+      securityCtx,
+    ]
+  );
+
+  // Scores + daily insight + change detection
+  const scores = useMemo(() => computeScores(snapshot), [snapshot]);
+  const humanSummary = useMemo(
+    () => buildHumanSummary(snapshot, scores),
+    [snapshot, scores]
+  );
+
+  const [lastSaved, setLastSaved] = useState(null);
+  const [lastDiff, setLastDiff] = useState(null);
+
+  function onDailySaved(savedSnap, prevSnap) {
+    setLastSaved(savedSnap);
+    if (prevSnap) {
+      setLastDiff(diffSnapshots(prevSnap, savedSnap));
+    } else {
+      setLastDiff(null);
+    }
+  }
+
+  function onLatency(ms) {
+    setLatency(ms);
+    toast("Latency test", `${ms.toFixed(2)} ms round-trip`);
+  }
 
   return (
     <>
@@ -134,7 +475,12 @@ function AppInner(){
       <Navbar />
 
       {/* Snapshot region for PDF export */}
-      <div id="snapshot" className="container">
+      <div
+        id="snapshot"
+        className={`container ${
+          mode === "focus" ? "modeFocus" : mode === "audit" ? "modeAudit" : ""
+        }`}
+      >
         <header className="hero">
           <div className="heroCard">
             <div className="heroTop">
@@ -142,20 +488,33 @@ function AppInner(){
                 <div className="logo" aria-hidden="true" />
                 <div>
                   <div className="brandName">NEXUS DIAGNOSTICS</div>
-                  <div className="small">Real-time browser environment overview</div>
+                  <div className="small">
+                    Real-time browser environment overview
+                  </div>
                 </div>
               </div>
 
-              <div className="actions" style={{marginTop:0}}>
+              <div className="actions" style={{ marginTop: 0 }}>
+                {/* Mode toggle (Focus / Default / Audit) */}
+                <ModeToggle mode={mode} setMode={setMode} />
+
+                {/* Existing PDF export (upgraded to multipage in file below) */}
                 <ExportPDF targetId="snapshot" onToast={toast} />
-                <ExportJSON diagnostics={diagnostics} redacted={redacted} onToast={toast} />
-                <CopySummary diagnostics={diagnostics} onToast={toast} />
-                <button className="btn btnGhost" onClick={() => setRedacted(v => !v)}>
-                  {redacted ? 'Redacted: ON' : 'Redacted: OFF'}
-                </button>
+
+                {/* Quick exports (JSON + summary + redacted) */}
+                <ExportsPanel
+                  snapshot={snapshot}
+                  summaryText={humanSummary}
+                  onToast={toast}
+                />
+
                 <button
                   className="btn btnPrimary"
-                  onClick={() => document.getElementById('specs')?.scrollIntoView({behavior:'smooth'})}
+                  onClick={() =>
+                    document
+                      .getElementById("specs")
+                      ?.scrollIntoView({ behavior: "smooth" })
+                  }
                 >
                   Run Diagnostics
                 </button>
@@ -163,46 +522,119 @@ function AppInner(){
             </div>
 
             <h1 className="heroH1">
-              Analyze your <span className="grad">runtime environment</span> like a game HUD.
+              Analyze your <span className="grad">runtime environment</span>.
             </h1>
             <p className="heroP">
-              This console reads supported browser APIs to display hardware, display, network,
-              storage, and privacy signals. It updates live and degrades gracefully when data is unavailable.
+              This console reads supported browser APIs to display hardware,
+              display, network, storage, and privacy signals. It updates live
+              and degrades gracefully when data is unavailable.
             </p>
+
+            {/* Daily insight (changes per day, but grounded in current signals) */}
+            <DailyInsight snapshot={snapshot} scores={scores} />
 
             <div className="kpiBar" aria-label="Key metrics">
               {kpi.map((k) => (
                 <div className="kpi" key={k.label}>
                   <div className="kpiLabel">{k.label}</div>
-                  <div className="kpiVal" style={k.tone ? {color:`var(--${k.tone === 'good' ? 'good' : 'bad'})`} : null}>
+                  <div
+                    className="kpiVal"
+                    style={
+                      k.tone
+                        ? {
+                            color: `var(--${
+                              k.tone === "good" ? "good" : "bad"
+                            })`,
+                          }
+                        : null
+                    }
+                  >
                     {k.val}
                   </div>
                 </div>
               ))}
             </div>
+
+            {/* Revisit hook — daily snapshot + what changed */}
+            <div style={{ marginTop: 14 }} className="grid2">
+              <DailySnapshotPanel
+                snapshot={snapshot}
+                onSaved={onDailySaved}
+                onToast={toast}
+              />
+              <ChangesPanel diff={lastDiff} lastSaved={lastSaved} />
+            </div>
           </div>
         </header>
 
         <main>
-          {/* System Specs */}
+          {/* Scores (domain-based, not a single grade) */}
+          <section id="scores" className="section">
+            <div className="h2Row">
+              <div>
+                <h2 className="h2">Readiness Overview</h2>
+                <p className="sub">
+                  Multi-domain scores (explainable, non-judgmental) based on
+                  today’s signals.
+                </p>
+              </div>
+              <span className="miniBadge">
+                <span className="dot dotGood" />
+                <span>Local-only</span>
+              </span>
+            </div>
+
+            <ScoresPanel snapshot={snapshot} scores={scores} />
+          </section>
+
+          {/* System Specs  */}
           <section id="specs" className="section">
             <div className="h2Row">
               <div>
                 <h2 className="h2">Hardware & OS</h2>
-                <p className="sub">Device signals exposed by the browser (privacy-capped in many cases).</p>
+                <p className="sub">
+                  Device signals exposed by the browser (privacy-capped in many
+                  cases).
+                </p>
               </div>
               <span className="miniBadge" title="Live connection status">
-                <span className={`dot ${online ? 'dotGood' : 'dotWarn'}`} />
+                <span className={`dot ${online ? "dotGood" : "dotWarn"}`} />
                 <span>{onlineLabel}</span>
               </span>
             </div>
 
             <div className="grid3">
               <Card title="Processor & Platform" badge="SYSTEM">
-                <StatRow label="CPU Cores" value={info.cores ?? 'Unknown'} />
+                <StatRow label="CPU Cores" value={info.cores ?? "Unknown"} />
                 <StatRow label="Platform" value={info.platform} />
-                <StatRow label="Device Memory" value={info.deviceMemory ? `~${info.deviceMemory} GB` : 'Privacy-capped'} />
+                <StatRow
+                  label="Device Memory"
+                  value={
+                    info.deviceMemory
+                      ? `~${info.deviceMemory} GB`
+                      : "Privacy-capped"
+                  }
+                />
                 <StatRow label="Language" value={info.lang} />
+
+                {/* Runtime/health additions */}
+                <div className="sep" />
+                <StatRow
+                  label="Event Loop Lag"
+                  value={
+                    eventLoopLag == null ? "—" : `${eventLoopLag.toFixed(1)} ms`
+                  }
+                />
+                <StatRow
+                  label="Long Tasks"
+                  value={
+                    longTasks?.count
+                      ? `${longTasks.count} (last ${
+                          longTasks.lastMs ?? "—"
+                        } ms)`
+                      : "—"
+                  }
+                />
               </Card>
 
               <Card title="Display & Viewport" badge="DISPLAY">
@@ -210,264 +642,56 @@ function AppInner(){
                 <StatRow label="Viewport" value={display.viewport} />
                 <StatRow label="Color Depth" value={display.colorDepth} />
                 <StatRow label="Pixel Ratio" value={display.pixelRatio} />
+
+                {/* Input/accessibility signals */}
+                <div className="sep" />
+                <StatRow
+                  label="Reduced Motion"
+                  value={snapshot?.a11y?.reducedMotion ?? "—"}
+                />
+                <StatRow
+                  label="Contrast Preference"
+                  value={snapshot?.a11y?.contrast ?? "—"}
+                />
+                <StatRow
+                  label="Pointer"
+                  value={snapshot?.a11y?.pointer ?? "—"}
+                />
               </Card>
 
               <Card title="Browser Identity" badge="BROWSER">
                 <StatRow label="Browser" value={info.browser} />
-                <StatRow label="Online" value={onlineLabel} tone={online ? 'good' : 'warn'} />
-                <StatRow label="User Agent" value={redacted ? 'Redacted (toggle in header)' : ((info.ua || '').slice(0, 44) + ((info.ua || '').length > 44 ? '…' : ''))} />
-                <StatRow label="UA Length" value={(info.ua || '').length ? `${(info.ua || '').length} chars` : '—'} />
-              </Card>
-            </div>
-          </section>
+                <StatRow
+                  label="Online"
+                  value={onlineLabel}
+                  tone={online ? "good" : "warn"}
+                />
+                <StatRow
+                  label="User Agent"
+                  value={
+                    (info.ua || "").slice(0, 44) +
+                    ((info.ua || "").length > 44 ? "…" : "")
+                  }
+                />
+                <StatRow
+                  label="UA Length"
+                  value={
+                    (info.ua || "").length
+                      ? `${(info.ua || "").length} chars`
+                      : "—"
+                  }
+                />
 
-          {/* Performance */}
-          <section id="performance" className="section">
-            <div className="h2Row">
-              <div>
-                <h2 className="h2">Performance & Runtime Health</h2>
-                <p className="sub">Signals that help explain stutter, jank, and slowdowns (no tracking, no uploads).</p>
-              </div>
-              <span className="miniBadge">
-                <span className="dot dotGood" />
-                <span>Live</span>
-              </span>
-            </div>
-
-            <div className="grid3">
-              <Card title="Loop & Frame" badge="PERF">
-                <StatRow label="FPS (est.)" value={fps ?? '—'} />
-                <StatRow label="Event-loop lag (avg)" value={`${perf.loopLag?.avgMs ?? '—'} ms`} />
-                <StatRow label="Event-loop lag (max)" value={`${perf.loopLag?.maxMs ?? '—'} ms`} />
-                <StatRow label="Long tasks" value={perf.longTasks?.supported ? `${perf.longTasks.count}` : 'Not supported'} />
-                <StatRow label="Longest task" value={perf.longTasks?.supported ? `${Math.round(perf.longTasks.maxMs)} ms` : '—'} />
-              </Card>
-
-              <Card title="JS Memory (where available)" badge="HEAP">
-                <StatRow label="Support" value={perf.memorySupported ? 'Detected' : 'Not exposed'} tone={perf.memorySupported ? 'good' : 'warn'} />
-                <StatRow label="Used" value={perf.memory?.used != null ? formatBytes(perf.memory.used) : '—'} />
-                <StatRow label="Total" value={perf.memory?.total != null ? formatBytes(perf.memory.total) : '—'} />
-                <StatRow label="Limit" value={perf.memory?.limit != null ? formatBytes(perf.memory.limit) : '—'} />
-                <div className="small" style={{ marginTop: 10 }}>
-                  Heap values are Chromium-only and privacy-sensitive. Treat as a hint, not a measurement tool.
-                </div>
-              </Card>
-
-              <Card title="Power" badge="BATTERY">
-                <StatRow label="API" value={battery.supported ? 'Supported' : 'Not supported'} tone={battery.supported ? 'good' : 'warn'} />
-                <StatRow label="Level" value={battery.battery ? `${battery.battery.level}%` : '—'} />
-                <StatRow label="Charging" value={battery.battery ? (battery.battery.charging ? 'Yes' : 'No') : '—'} />
-                <StatRow label="Charge time" value={battery.battery ? (battery.battery.chargingTime === Infinity ? '∞' : `${battery.battery.chargingTime}s`) : '—'} />
-                <StatRow label="Discharge time" value={battery.battery ? (battery.battery.dischargingTime === Infinity ? '∞' : `${battery.battery.dischargingTime}s`) : '—'} />
-              </Card>
-            </div>
-          </section>
-
-          {/* Capabilities */}
-          <section id="capabilities" className="section">
-            <div className="h2Row">
-              <div>
-                <h2 className="h2">Media & Capability Matrix</h2>
-                <p className="sub">Helpful for streaming, recording, and compatibility checks.</p>
-              </div>
-              <span className="miniBadge">
-                <span className="dot dotGood" />
-                <span>{media.mediaCapabilities ? 'MediaCapabilities Present' : 'Basic Checks Only'}</span>
-              </span>
-            </div>
-
-            <div className="grid2">
-              <Card title="Codec Support" badge="MEDIA">
-                <div className="list">
-                  {media.rows?.map((r, idx) => (
-                    <div className="listItem" key={idx}>
-                      <div className="listKey">{r.group}: {r.name}</div>
-                      <div className="listVal">{r.canPlay}</div>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-
-              <Card title="Why this matters" badge="GUIDE">
-                <div className="small">
-                  <p style={{margin:'0 0 10px'}}>
-                    Browsers differ dramatically in what formats they decode efficiently. This helps you choose exports for videos, audio previews,
-                    and screenshots that work everywhere.
-                  </p>
-                  <p style={{margin:'0 0 10px'}}>
-                    The MediaCapabilities rows are a best-effort hint about smooth playback and power efficiency.
-                  </p>
-                  <p style={{margin:0}}>
-                    No device enumeration occurs here (no listing of microphones/cameras). This is strictly format capability reporting.
-                  </p>
-                </div>
-              </Card>
-            </div>
-          </section>
-
-          {/* Storage health */}
-          <section id="storage" className="section">
-            <div className="h2Row">
-              <div>
-                <h2 className="h2">Storage Health & Persistence</h2>
-                <p className="sub">A deeper view than raw localStorage size: quota, persistence, and IndexedDB availability.</p>
-              </div>
-              <span className="miniBadge">
-                <span className="dot dotGood" />
-                <span>{storageHealth.persisted == null ? '—' : (storageHealth.persisted ? 'Persisted' : 'Not Persisted')}</span>
-              </span>
-            </div>
-
-            <div className="grid3">
-              <Card title="Quota Estimate" badge="QUOTA">
-                <StatRow label="Supported" value={storageHealth.quota ? 'Yes' : 'No'} tone={storageHealth.quota ? 'good' : 'warn'} />
-                <StatRow label="Usage" value={storageHealth.quota?.usage != null ? formatBytes(storageHealth.quota.usage) : '—'} />
-                <StatRow label="Quota" value={storageHealth.quota?.quota != null ? formatBytes(storageHealth.quota.quota) : '—'} />
-                <div className="small" style={{ marginTop: 10 }}>
-                  Estimate values vary and may be rounded. Useful for "are we near storage pressure" checks.
-                </div>
-              </Card>
-
-              <Card title="Persistence" badge="PERSIST">
-                <StatRow label="Persisted" value={storageHealth.persisted == null ? 'Unavailable' : (storageHealth.persisted ? 'Yes' : 'No')} tone={storageHealth.persisted ? 'good' : 'warn'} />
-                <StatRow label="LocalStorage" value={bytes == null ? 'Blocked' : 'OK'} tone={bytes == null ? 'warn' : 'good'} />
-                <StatRow label="Storage Used" value={bytes == null ? '—' : formatBytes(bytes)} />
-                <div className="small" style={{ marginTop: 10 }}>
-                  Persisted storage is less likely to be evicted under pressure. Many browsers require user engagement to grant persistence.
-                </div>
-              </Card>
-
-              <Card title="IndexedDB" badge="IDB">
-                <StatRow label="Supported" value={storageHealth.indexedDB?.supported ? 'Yes' : 'No'} tone={storageHealth.indexedDB?.supported ? 'good' : 'warn'} />
-                <StatRow label="Health" value={storageHealth.indexedDB?.supported ? (storageHealth.indexedDB.ok ? 'OK' : 'Blocked/Error') : '—'} tone={storageHealth.indexedDB?.supported && storageHealth.indexedDB.ok ? 'good' : 'warn'} />
-                <div className="small" style={{ marginTop: 10 }}>
-                  IndexedDB is commonly used for offline caches, logs, and structured data. Blocking it can break advanced apps.
-                </div>
-              </Card>
-            </div>
-          </section>
-
-          {/* Permissions */}
-          <section id="permissions" className="section">
-            <div className="h2Row">
-              <div>
-                <h2 className="h2">Permissions Overview</h2>
-                <p className="sub">A safe read-only view of permission states. No permission prompts are triggered.</p>
-              </div>
-              <span className="miniBadge">
-                <span className="dot dotGood" />
-                <span>{perms.supported ? 'Permissions API' : 'Unavailable'}</span>
-              </span>
-            </div>
-
-            <div className="grid2">
-              <Card title="Permission States" badge="PERMS">
-                <div className="list">
-                  {perms.rows?.map((r) => (
-                    <div className="listItem" key={r.name}>
-                      <div className="listKey">{r.name}</div>
-                      <div className="listVal">{r.state}</div>
-                    </div>
-                  ))}
-                </div>
-                <div className="small" style={{ marginTop: 10 }}>
-                  "Unavailable" usually means the browser blocks querying this permission or the feature does not exist.
-                </div>
-              </Card>
-
-              <Card title="Session Signals" badge="SESSION">
-                <StatRow label="Navigation type" value={session.navType} />
-                <StatRow label="Visibility" value={session.visibility} />
-                <StatRow label="Focused" value={session.focused == null ? '—' : (session.focused ? 'Yes' : 'No')} />
-                <StatRow label="Visibility changes" value={session.visibilityChanges} />
-                <StatRow label="Focus changes" value={session.focusChanges} />
-                <StatRow label="BFCache restore" value={session.bfcacheRestore ? 'Yes' : 'No'} />
-                <div className="small" style={{ marginTop: 10 }}>
-                  Useful for debugging "why did updates pause" when tabs are backgrounded or throttled.
-                </div>
-              </Card>
-            </div>
-          </section>
-
-          {/* Accessibility */}
-          <section id="accessibility" className="section">
-            <div className="h2Row">
-              <div>
-                <h2 className="h2">Accessibility Preferences</h2>
-                <p className="sub">Display and interaction preferences reported by the OS/browser.</p>
-              </div>
-              <span className="miniBadge">
-                <span className="dot dotGood" />
-                <span>{a11y.colorScheme} scheme</span>
-              </span>
-            </div>
-
-            <div className="grid3">
-              <Card title="Motion & Contrast" badge="A11Y">
-                <StatRow label="Reduced motion" value={a11y.reducedMotion ? 'Yes' : 'No'} />
-                <StatRow label="Reduced transparency" value={a11y.reducedTransparency ? 'Yes' : 'No'} />
-                <StatRow label="Contrast" value={a11y.contrastMore ? 'More' : (a11y.contrastLess ? 'Less' : 'Default')} />
-                <StatRow label="Forced colors" value={a11y.forcedColors ? 'Active' : 'Off'} />
-              </Card>
-
-              <Card title="Pointer" badge="INPUT">
-                <StatRow label="Pointer" value={a11y.pointer} />
-                <StatRow label="Hover" value={a11y.hover} />
-                <div className="small" style={{ marginTop: 10 }}>
-                  Helps choose UI hit targets for touch vs mouse and hover-enabled surfaces.
-                </div>
-              </Card>
-
-              <Card title="Recommendations" badge="UX">
-                <div className="small">
-                  <p style={{margin:'0 0 10px'}}>
-                    If reduced motion is enabled, prefer fewer animated glows and use gentle fades.
-                  </p>
-                  <p style={{margin:'0 0 10px'}}>
-                    If contrast is set to "more" or forced colors are active, ensure critical info is not encoded by color alone.
-                  </p>
-                  <p style={{margin:0}}>
-                    This tool reads preferences only; it never changes your OS settings.
-                  </p>
-                </div>
-              </Card>
-            </div>
-          </section>
-
-          {/* Security context */}
-          <section id="security" className="section">
-            <div className="h2Row">
-              <div>
-                <h2 className="h2">Security Context</h2>
-                <p className="sub">High-level browser security signals useful for debugging features and deployment configuration.</p>
-              </div>
-              <span className="miniBadge">
-                <span className={`dot ${security.isSecureContext ? 'dotGood' : 'dotWarn'}`} />
-                <span>{security.isSecureContext ? 'Secure Context' : 'Not Secure'}</span>
-              </span>
-            </div>
-
-            <div className="grid3">
-              <Card title="Context" badge="SEC">
-                <StatRow label="Protocol" value={security.protocol} />
-                <StatRow label="Secure context" value={security.isSecureContext ? 'Yes' : 'No'} tone={security.isSecureContext ? 'good' : 'warn'} />
-                <StatRow label="Cross-Origin Isolated" value={security.crossOriginIsolated ? 'Yes' : 'No'} />
-                <StatRow label="Next hop protocol" value={security.nextHopProtocol} />
-              </Card>
-
-              <Card title="Service Worker" badge="SW">
-                <StatRow label="Supported" value={security.serviceWorkerSupported ? 'Yes' : 'No'} tone={security.serviceWorkerSupported ? 'good' : 'warn'} />
-                <StatRow label="Controlled" value={security.serviceWorkerControlled ? 'Yes' : 'No'} />
-                <div className="small" style={{ marginTop: 10 }}>
-                  Controlled means a service worker is actively handling this page. Useful for offline and caching behavior.
-                </div>
-              </Card>
-
-              <Card title="Snapshots" badge="COMPARE">
-                <SnapshotTools diagnostics={diagnostics} onToast={toast} />
-                <div className="small" style={{ marginTop: 10 }}>
-                  Saved locally only. Use Compare to see what changed (network, capabilities, etc.).
-                </div>
+                {/* Heap (when supported) */}
+                <div className="sep" />
+                <StatRow
+                  label="JS Heap Used"
+                  value={heap?.used != null ? formatBytes(heap.used) : "—"}
+                />
+                <StatRow
+                  label="JS Heap Limit"
+                  value={heap?.limit != null ? formatBytes(heap.limit) : "—"}
+                />
               </Card>
             </div>
           </section>
@@ -477,11 +701,14 @@ function AppInner(){
             <div className="h2Row">
               <div>
                 <h2 className="h2">Network Analysis</h2>
-                <p className="sub">Network Information API varies by browser and may be unavailable.</p>
+                <p className="sub">
+                  Network Information API varies by browser and may be
+                  unavailable.
+                </p>
               </div>
               <span className="miniBadge">
                 <span className="dot dotGood" />
-                <span>{net.supported ? 'API Detected' : 'API Missing'}</span>
+                <span>{net.supported ? "API Detected" : "API Missing"}</span>
               </span>
             </div>
 
@@ -490,38 +717,163 @@ function AppInner(){
                 <StatRow label="Effective Type" value={netType} />
                 <StatRow label="Downlink (Reported)" value={down} />
                 <StatRow label="RTT (Reported)" value={rtt} />
-                <StatRow label="Data Saver" value={net.supported ? (net.saveData ? 'Enabled' : 'Disabled') : '—'} />
-                <div style={{marginTop: 12}}>
-                  <PingTest
-                    onResult={(ms) => { setLatency(ms); toast('Latency test', `${ms.toFixed(2)} ms round-trip`)}}
-                  />
+                <StatRow
+                  label="Data Saver"
+                  value={
+                    net.supported
+                      ? net.saveData
+                        ? "Enabled"
+                        : "Disabled"
+                      : "—"
+                  }
+                />
+
+                {/* protocol */}
+                <div className="sep" />
+                <StatRow
+                  label="Next Hop Protocol"
+                  value={securityCtx?.nextHopProtocol ?? "—"}
+                />
+
+                <div style={{ marginTop: 12 }}>
+                  <PingTest onResult={onLatency} />
                 </div>
               </Card>
 
               <Card title="Stability Notes" badge="GUIDE">
                 <div className="small">
-                  <p style={{margin:'0 0 10px'}}>
-                    Some browsers intentionally reduce precision for privacy/security. When values look missing or
+                  <p style={{ margin: "0 0 10px" }}>
+                    Some browsers intentionally reduce precision for
+                    privacy/security. When values look missing or
                     overly-rounded, that's expected.
                   </p>
-                  <p style={{margin:'0 0 10px'}}>
-                    For the cleanest view: run in a modern Chromium-based browser, disable aggressive tracking protection,
-                    and allow this page to store local data.
+                  <p style={{ margin: "0 0 10px" }}>
+                    For the cleanest view: run in a modern Chromium-based
+                    browser, disable aggressive tracking protection, and allow
+                    this page to store local data.
                   </p>
-                  <p style={{margin:0}}>
-                    Tip: Export a PDF snapshot before sharing results with someone else.
+                  <p style={{ margin: 0 }}>
+                    Tip: Export a PDF snapshot before sharing results with
+                    someone else.
                   </p>
+                </div>
+              </Card>
+            </div>
+
+            {/*  Media capability panel (safe capability checks) */}
+            <div className="grid2" style={{ marginTop: 16 }}>
+              <Card title="Media & Codec Support" badge="MEDIA">
+                <div className="small">
+                  These are capability checks only (no device enumeration).
+                </div>
+                <div className="sep" />
+                <div className="grid2">
+                  <div>
+                    <div
+                      className="small"
+                      style={{ fontWeight: 900, marginBottom: 8 }}
+                    >
+                      Video
+                    </div>
+                    {(mediaCaps?.video ?? []).map((v) => (
+                      <div className="row" key={v.label}>
+                        <div className="label">{v.label}</div>
+                        <div
+                          className="value"
+                          style={{
+                            color: v.ok ? "var(--good)" : "var(--warn)",
+                          }}
+                        >
+                          {v.ok ? "Supported" : "Unknown/No"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div>
+                    <div
+                      className="small"
+                      style={{ fontWeight: 900, marginBottom: 8 }}
+                    >
+                      Audio
+                    </div>
+                    {(mediaCaps?.audio ?? []).map((a) => (
+                      <div className="row" key={a.label}>
+                        <div className="label">{a.label}</div>
+                        <div
+                          className="value"
+                          style={{
+                            color: a.ok ? "var(--good)" : "var(--warn)",
+                          }}
+                        >
+                          {a.ok ? "Supported" : "Unknown/No"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="sep" />
+                <div>
+                  <div
+                    className="small"
+                    style={{ fontWeight: 900, marginBottom: 8 }}
+                  >
+                    Images
+                  </div>
+                  {(mediaCaps?.images ?? []).map((i) => (
+                    <div className="row" key={i.label}>
+                      <div className="label">{i.label}</div>
+                      <div
+                        className="value"
+                        style={{ color: i.ok ? "var(--good)" : "var(--warn)" }}
+                      >
+                        {i.ok ? "Supported" : "Unknown/No"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+
+              <Card title="Power & Battery" badge="POWER">
+                <StatRow
+                  label="Battery API"
+                  value={battery ? "Available" : "Not supported"}
+                />
+                <StatRow
+                  label="Level"
+                  value={battery ? `${battery.level}%` : "—"}
+                />
+                <StatRow
+                  label="Charging"
+                  value={battery ? (battery.charging ? "Yes" : "No") : "—"}
+                />
+                <StatRow
+                  label="Discharge Time"
+                  value={
+                    battery &&
+                    !battery.charging &&
+                    Number.isFinite(battery.dischargingTime)
+                      ? `${Math.round(battery.dischargingTime / 60)} min`
+                      : "—"
+                  }
+                />
+                <div className="sep" />
+                <div className="small">
+                  Battery data is restricted in many browsers. We only read what
+                  the browser exposes (no permissions requested).
                 </div>
               </Card>
             </div>
           </section>
 
-          {/* Tools */}
+          {/* Tools  */}
           <section id="tools" className="section">
             <div className="h2Row">
               <div>
                 <h2 className="h2">Utilities</h2>
-                <p className="sub">Small tools that feel like a game console: clean, fast, and reliable.</p>
+                <p className="sub">
+                  Small tools that feel like a game console: clean, fast, and
+                  reliable.
+                </p>
               </div>
               <span className="miniBadge">
                 <span className="dot dotGood" />
@@ -531,10 +883,65 @@ function AppInner(){
 
             <div className="grid3">
               <Card title="Local Storage" badge="STORAGE">
-                <StatRow label="Used" value={bytes == null ? 'Blocked/Unavailable' : formatBytes(bytes)} />
+                <StatRow
+                  label="Used (localStorage)"
+                  value={
+                    bytes == null ? "Blocked/Unavailable" : formatBytes(bytes)
+                  }
+                />
                 <StatRow label="Estimated Limit" value="Varies by browser" />
-                <div style={{display:'flex', gap:10, flexWrap:'wrap', marginTop: 12}}>
-                  <button className="btn btnGhost" onClick={() => toast('Snapshot', `Storage: ${bytes == null ? '—' : formatBytes(bytes)}`)}>
+
+                {/*  Storage estimate + persistence + idb */}
+                <div className="sep" />
+                <StatRow
+                  label="Storage Usage (estimate)"
+                  value={
+                    storageEstimate?.usage != null
+                      ? formatBytes(storageEstimate.usage)
+                      : "—"
+                  }
+                />
+                <StatRow
+                  label="Storage Quota (estimate)"
+                  value={
+                    storageEstimate?.quota != null
+                      ? formatBytes(storageEstimate.quota)
+                      : "—"
+                  }
+                />
+                <StatRow
+                  label="Persisted Storage"
+                  value={
+                    storagePersisted == null
+                      ? "—"
+                      : storagePersisted
+                      ? "Yes"
+                      : "No"
+                  }
+                />
+                <StatRow
+                  label="IndexedDB Health"
+                  value={idbOk == null ? "—" : idbOk ? "OK" : "Blocked/Fail"}
+                  tone={idbOk ? "good" : idbOk === false ? "warn" : undefined}
+                />
+
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 10,
+                    flexWrap: "wrap",
+                    marginTop: 12,
+                  }}
+                >
+                  <button
+                    className="btn btnGhost"
+                    onClick={() =>
+                      toast(
+                        "Snapshot",
+                        `Storage: ${bytes == null ? "—" : formatBytes(bytes)}`
+                      )
+                    }
+                  >
                     Quick Toast
                   </button>
                   <button className="btn" onClick={clearStorage}>
@@ -544,71 +951,84 @@ function AppInner(){
               </Card>
 
               <Card title="System Time" badge="CLOCK">
-                <div style={{textAlign:'center', padding:'6px 0 2px'}}>
-                  <div style={{fontFamily:'var(--mono)', fontWeight:900, fontSize:'2rem', color:'rgba(234,242,255,.92)'}}>
+                <div style={{ textAlign: "center", padding: "6px 0 2px" }}>
+                  <div
+                    style={{
+                      fontFamily: "var(--mono)",
+                      fontWeight: 900,
+                      fontSize: "2rem",
+                      color: "rgba(234,242,255,.92)",
+                    }}
+                  >
                     {time}
                   </div>
-                  <div className="small" style={{marginTop:6}}>{date}</div>
+                  <div className="small" style={{ marginTop: 6 }}>
+                    {date}
+                  </div>
                   <div className="sep" />
-                  <div className="small">FPS (est.): <span style={{fontFamily:'var(--mono)', color:'var(--neon)', fontWeight:900}}>{fps ?? '—'}</span></div>
+                  <div className="small">
+                    FPS (est.):{" "}
+                    <span
+                      style={{
+                        fontFamily: "var(--mono)",
+                        color: "var(--neon)",
+                        fontWeight: 900,
+                      }}
+                    >
+                      {fps ?? "—"}
+                    </span>
+                  </div>
+                  <div className="small">
+                    Event-loop lag:{" "}
+                    <span
+                      style={{
+                        fontFamily: "var(--mono)",
+                        color: "var(--neon)",
+                        fontWeight: 900,
+                      }}
+                    >
+                      {eventLoopLag == null
+                        ? "—"
+                        : `${eventLoopLag.toFixed(1)} ms`}
+                    </span>
+                  </div>
                 </div>
               </Card>
 
               <Card title="Command Line" badge="CLI">
                 <Terminal
-                  contextInfo={systemContext}
-                  onToast={(t,m)=>toast(t,m)}
+                  contextInfo={{
+                    ...systemContext,
+                    snapshot,
+                    scores,
+                    summaryText: humanSummary,
+                  }}
+                  onToast={(t, m) => toast(t, m)}
                 />
               </Card>
             </div>
-          </section>
 
-          {/* Safety */}
-          <section id="safety" className="section">
-            <div className="h2Row">
-              <div>
-                <h2 className="h2">Safety & Legal Scope</h2>
-                <p className="sub">Built to be useful without collecting sensitive data or enabling malicious behavior.</p>
-              </div>
-              <span className="miniBadge">
-                <span className="dot dotGood" />
-                <span>Privacy-first</span>
-              </span>
+            {/* Notifications (opt-in only) + “console mode” explanation */}
+            <div className="grid2" style={{ marginTop: 16 }}>
+              <NotificationsPanel snapshot={snapshot} onToast={toast} />
+              <Card title="Console Modes" badge="UX">
+                <div className="small">
+                  <p style={{ margin: "0 0 10px" }}>
+                    <b>Focus</b> hides extra explanation and reduces motion.{" "}
+                    <b>Audit</b> expands details for troubleshooting. Your mode
+                    is saved locally on this device.
+                  </p>
+                  <p style={{ margin: 0 }}>
+                    Tip: Use Focus mode on mobile or during streaming; use Audit
+                    mode when diagnosing issues.
+                  </p>
+                </div>
+              </Card>
             </div>
 
-            <div className="grid2">
-              <Card title="What this tool DOES" badge="SAFE">
-                <div className="small">
-                  <p style={{margin:'0 0 10px'}}>
-                    Reads standard browser APIs that are already exposed to the page you opened (hardwareConcurrency, screen metrics,
-                    connectivity hints, capability checks, and accessibility preferences).
-                  </p>
-                  <p style={{margin:'0 0 10px'}}>
-                    Generates exports locally (PDF/JSON) and stores optional snapshots only in localStorage on your device.
-                  </p>
-                  <p style={{margin:0}}>
-                    Permission checks are read-only: no permission prompts are triggered.
-                  </p>
-                </div>
-              </Card>
-
-              <Card title="What this tool does NOT collect" badge="NOPE">
-                <div className="list">
-                  {[
-                    'No precise location (no GPS/geolocation reads)',
-                    'No camera/mic enumeration or recordings',
-                    'No installed fonts/plugins enumeration',
-                    'No local network scanning / port probing',
-                    'No keystroke logging or background tracking',
-                    'No cross-site identifiers or fingerprinting attempts'
-                  ].map((t) => (
-                    <div className="listItem" key={t}>
-                      <div className="listKey">Blocked by design</div>
-                      <div className="listVal">{t}</div>
-                    </div>
-                  ))}
-                </div>
-              </Card>
+            {/* Timeline */}
+            <div style={{ marginTop: 16 }}>
+              <TimelinePanel />
             </div>
           </section>
 
@@ -617,7 +1037,10 @@ function AppInner(){
             <div className="h2Row">
               <div>
                 <h2 className="h2">Privacy & Security</h2>
-                <p className="sub">A clear view of what the browser reveals and what it intentionally hides.</p>
+                <p className="sub">
+                  A clear view of what the browser reveals and what it
+                  intentionally hides.
+                </p>
               </div>
               <span className="miniBadge">
                 <span className="dot dotGood" />
@@ -627,44 +1050,90 @@ function AppInner(){
 
             <div className="grid2">
               <Card title="Signals" badge="PRIVACY">
-                {privacy.map(p => (
+                {privacy.map((p) => (
                   <StatRow key={p.k} label={p.k} value={p.v} />
                 ))}
+
+                {/*  Permissions (query-only) */}
+                <div className="sep" />
+                <div
+                  className="small"
+                  style={{ fontWeight: 900, marginBottom: 8 }}
+                >
+                  Permissions (query-only)
+                </div>
+                {permissions ? (
+                  Object.entries(permissions).map(([k, v]) => (
+                    <StatRow key={k} label={k} value={v} />
+                  ))
+                ) : (
+                  <StatRow label="Permissions API" value="Not available" />
+                )}
               </Card>
 
               <Card title="Data Policy" badge="LOCAL">
                 <div className="small">
-                  <p style={{margin:'0 0 10px'}}>
-                    NEXUS runs entirely in your browser. It does not send your diagnostics to a server.
-                    Any stored data is limited to your browser&apos;s local storage for this origin.
+                  <p style={{ margin: "0 0 10px" }}>
+                    NEXUS runs entirely in your browser. It does not send your
+                    diagnostics to a server. Any stored data is limited to your
+                    browser&apos;s local storage for this origin.
                   </p>
-                  <p style={{margin:'0 0 10px'}}>
-                    If you deploy this, consider adding your own analytics only if you have a clear privacy policy.
+                  <p style={{ margin: "0 0 10px" }}>
+                    If you deploy this, consider adding your own analytics only
+                    if you have a clear privacy policy.
                   </p>
-                  <p style={{margin:0}}>
-                    Exported PDFs are generated on-device and downloaded directly—no upload occurs.
+                  <p style={{ margin: 0 }}>
+                    Exported PDFs are generated on-device and downloaded
+                    directly—no upload occurs.
                   </p>
                 </div>
+
+                {/* Security context signals */}
+                <div className="sep" />
+                <StatRow
+                  label="Secure Context"
+                  value={securityCtx?.isSecure ? "Yes" : "No"}
+                  tone={securityCtx?.isSecure ? "good" : "warn"}
+                />
+                <StatRow label="Protocol" value={securityCtx?.proto ?? "—"} />
+                <StatRow
+                  label="Cross-Origin Isolated"
+                  value={securityCtx?.coi ? "Yes" : "No"}
+                />
+                <StatRow
+                  label="Service Worker Support"
+                  value={securityCtx?.sw ? "Yes" : "No"}
+                />
+                <StatRow
+                  label="SW Controller"
+                  value={securityCtx?.controlled ? "Active" : "None"}
+                />
               </Card>
+            </div>
+
+            {/* Trust block (retention via respect) */}
+            <div style={{ marginTop: 16 }}>
+              <TrustBlock />
             </div>
 
             <footer className="footer">
               <div className="sep" />
               <div className="small">
-                NEXUS Diagnostics — built with Vite + React. Neon-green HUD styling for PC, tablet, and mobile.
+                NEXUS Diagnostics — built with Vite + React. Neon-green HUD
+                styling for PC, tablet, and mobile.
               </div>
             </footer>
           </section>
         </main>
       </div>
     </>
-  )
+  );
 }
 
-export default function App(){
+export default function App() {
   return (
     <ToastProvider>
       <AppInner />
     </ToastProvider>
-  )
+  );
 }
